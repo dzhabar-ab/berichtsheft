@@ -1,0 +1,129 @@
+<!doctype html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Berichtsheft</title>
+<style>
+  :root { --bg:#fff; --fg:#1a1a1a; --muted:#666; --card:#f4f5f7; --accent:#1a56db; --ok:#0a7d33; --err:#b42318; }
+  @media (prefers-color-scheme: dark) {
+    :root { --bg:#16181d; --fg:#eceef2; --muted:#9aa1ad; --card:#22262e; --accent:#6ea0ff; --ok:#4ad07a; --err:#ff8a80; }
+  }
+  body { margin:0; background:var(--bg); color:var(--fg); font:16px/1.5 system-ui,-apple-system,Segoe UI,Roboto,sans-serif; }
+  main { max-width:640px; margin:0 auto; padding:24px 16px 48px; }
+  h1 { font-size:1.4rem; margin:0 0 4px; }
+  p.sub { color:var(--muted); margin:0 0 20px; }
+  .card { background:var(--card); border-radius:12px; padding:16px; margin-bottom:16px; }
+  button { font:inherit; background:var(--accent); color:#fff; border:0; border-radius:8px; padding:10px 16px; cursor:pointer; }
+  button:disabled { opacity:.5; cursor:default; }
+  ol { padding-left:1.2em; margin:0; }
+  li { margin:6px 0; }
+  li.ok::marker { color:var(--ok); } li.err::marker { color:var(--err); }
+  .ok { color:var(--ok); } .err { color:var(--err); }
+  pre { white-space:pre-wrap; word-break:break-word; margin:8px 0 0; font-size:.85rem; color:var(--muted); }
+</style>
+</head>
+<body>
+<main>
+  <h1>Berichtsheft</h1>
+  <p class="sub">Проверка соединения: страница → вход через Google → ваш Google Drive.</p>
+
+  <div class="card">
+    <button id="go" disabled>Войти через Google и проверить</button>
+    <ol id="steps" style="margin-top:14px"></ol>
+    <pre id="detail"></pre>
+  </div>
+</main>
+
+<script src="config.js"></script>
+<script>
+(function () {
+  var cfg = window.BERICHTSHEFT_CONFIG;
+  var btn = document.getElementById('go');
+  var stepsEl = document.getElementById('steps');
+  var detailEl = document.getElementById('detail');
+  var tokenClient = null;
+
+  function step(text, cls) {
+    var li = document.createElement('li');
+    li.textContent = text;
+    if (cls) li.className = cls;
+    stepsEl.appendChild(li);
+  }
+  function fail(text, err) {
+    step(text, 'err');
+    if (err) detailEl.textContent = String(err && err.message ? err.message : err);
+    btn.disabled = false;
+  }
+
+  function waitForGsi(cb, tries) {
+    tries = tries || 0;
+    if (window.google && google.accounts && google.accounts.oauth2) return cb(true);
+    if (tries > 50) return cb(false);
+    setTimeout(function () { waitForGsi(cb, tries + 1); }, 200);
+  }
+
+  waitForGsi(function (ok) {
+    if (!ok) { step('Не удалось загрузить скрипт входа Google (возможно, он заблокирован сетью).', 'err'); return; }
+    tokenClient = google.accounts.oauth2.initTokenClient({
+      client_id: cfg.clientId,
+      scope: cfg.scope,
+      callback: onToken,
+      error_callback: function (e) { fail('Вход не выполнен: ' + (e && e.type ? e.type : 'отмена или ошибка'), e && e.message); }
+    });
+    btn.disabled = false;
+  });
+
+  btn.addEventListener('click', function () {
+    stepsEl.innerHTML = ''; detailEl.textContent = '';
+    btn.disabled = true;
+    tokenClient.requestAccessToken({ prompt: '' });
+  });
+
+  async function drive(url, opts, token) {
+    opts = opts || {};
+    opts.headers = Object.assign({ Authorization: 'Bearer ' + token }, opts.headers || {});
+    var r = await fetch(url, opts);
+    if (!r.ok) throw new Error('HTTP ' + r.status + ' — ' + (await r.text()).slice(0, 300));
+    return r;
+  }
+
+  async function onToken(resp) {
+    if (resp.error) { fail('Google вернул ошибку: ' + resp.error, resp.error_description); return; }
+    var token = resp.access_token;
+    step('Вход через Google выполнен', 'ok');
+    try {
+      var q = encodeURIComponent("name='" + cfg.testFileName + "' and trashed=false");
+      var found = await (await drive('https://www.googleapis.com/drive/v3/files?q=' + q + '&fields=files(id,name)', {}, token)).json();
+      var payload = JSON.stringify({ geschrieben: new Date().toISOString(), hinweis: 'Testdatei von Berichtsheft' });
+      var id;
+      if (found.files && found.files.length) {
+        id = found.files[0].id;
+        await drive('https://www.googleapis.com/upload/drive/v3/files/' + id + '?uploadType=media', {
+          method: 'PATCH', headers: { 'Content-Type': 'application/json' }, body: payload
+        }, token);
+        step('Тестовый файл в вашем Drive обновлён', 'ok');
+      } else {
+        var boundary = 'bh' + Math.random().toString(36).slice(2);
+        var body = '--' + boundary + '\r\nContent-Type: application/json; charset=UTF-8\r\n\r\n' +
+          JSON.stringify({ name: cfg.testFileName, mimeType: 'application/json' }) +
+          '\r\n--' + boundary + '\r\nContent-Type: application/json\r\n\r\n' + payload + '\r\n--' + boundary + '--';
+        var created = await (await drive('https://www.googleapis.com/upload/drive/v3/files?uploadType=multipart&fields=id', {
+          method: 'POST', headers: { 'Content-Type': 'multipart/related; boundary=' + boundary }, body: body
+        }, token)).json();
+        id = created.id;
+        step('Тестовый файл создан в вашем Drive', 'ok');
+      }
+      var back = await (await drive('https://www.googleapis.com/drive/v3/files/' + id + '?alt=media', {}, token)).text();
+      step('Файл прочитан обратно — всё работает', 'ok');
+      detailEl.textContent = back;
+    } catch (e) {
+      fail('Ошибка при работе с Google Drive', e);
+      return;
+    }
+    btn.disabled = false;
+  }
+})();
+</script>
+</body>
+</html>
