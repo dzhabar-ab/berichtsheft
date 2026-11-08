@@ -80,5 +80,20 @@ def widen(tbl):
     return tbl
 t['week'] = re.sub(r'<w:tbl>.*?</w:tbl>', lambda m: widen(m.group(0)), t['week'], count=1, flags=re.S)
 t['absRow'] = patch_cells(t['absRow'], abs_rules)
+
+# Kopf-Tabelle so breit wie die Haupttabelle (Einzug 98, Breite 9642).
+# Die zusätzliche Breite bekommt die letzte Spalte (Abteilung / Datum bis / Name).
+def full_width(tbl):
+    if '@@VOM@@' not in tbl or '<w:tblW w:w="9273" w:type="dxa"/>' not in tbl:
+        return tbl
+    extra = 9642 - 9273
+    tbl = tbl.replace('<w:tblW w:w="9273" w:type="dxa"/>', '<w:tblW w:w="9642" w:type="dxa"/>', 1)
+    tbl = tbl.replace('<w:tblInd w:w="149" w:type="dxa"/>', '<w:tblInd w:w="98" w:type="dxa"/>', 1)
+    tbl = tbl.replace('<w:gridCol w:w="2269"/></w:tblGrid>', '<w:gridCol w:w="%d"/></w:tblGrid>' % (2269 + extra), 1)
+    tbl = tbl.replace('<w:tcW w:w="2269" w:type="dxa"/>', '<w:tcW w:w="%d" w:type="dxa"/>' % (2269 + extra))
+    tbl = tbl.replace('<w:tcW w:w="4252" w:type="dxa"/>', '<w:tcW w:w="%d" w:type="dxa"/>' % (4252 + extra))
+    tbl = re.sub(r'<w:tcW w:w="(6273|6023)" w:type="dxa"/>', lambda m: '<w:tcW w:w="%d" w:type="dxa"/>' % (int(m.group(1)) + extra), tbl)
+    return tbl
+t['week'] = re.sub(r'<w:tbl>.*?</w:tbl>', lambda m: full_width(m.group(0)), t['week'], count=1, flags=re.S)
 json.dump(t, open(path, 'w', encoding='utf-8'), ensure_ascii=False)
 print('week changed:', before != t['week'])
